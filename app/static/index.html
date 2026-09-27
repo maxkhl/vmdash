@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vmdash</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="mock-banner" class="mock-banner" hidden>
+    MOCK-MODUS – es werden keine echten VMs angesprochen
+  </div>
+
+  <header class="top">
+    <div class="brand">
+      <h1>vmdash</h1>
+      <span class="sub">Kunden-VMs auf maxwork</span>
+    </div>
+    <div class="top-actions">
+      <span id="conn" class="conn" title="Verbindung zum Dashboard"></span>
+      <button id="btn-clone" class="btn primary" type="button">Neue VM klonen</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="error" class="error-bar" hidden></div>
+    <section id="vms" class="vm-grid" aria-live="polite">
+      <p class="muted">Lade …</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span id="version"></span>
+  </footer>
+
+  <!-- Starten -->
+  <dialog id="dlg-start">
+    <form method="dialog" class="dlg">
+      <h2>VM starten: <span data-bind="name"></span></h2>
+      <p class="muted">Die VM wird gestartet und die LUKS-Passphrase über die serielle Konsole eingegeben.</p>
+      <label>LUKS-Passphrase
+        <input type="password" name="passphrase" autocomplete="off" required>
+      </label>
+      <p class="dlg-error" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn" value="cancel" data-close>Abbrechen</button>
+        <button type="submit" class="btn primary">Starten</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Erneute Eingabe nach wrong_key -->
+  <dialog id="dlg-retry">
+    <form method="dialog" class="dlg">
+      <h2>Passphrase falsch: <span data-bind="name"></span></h2>
+      <p class="muted">Die VM wartet am LUKS-Prompt. Bitte die Passphrase erneut eingeben (ohne Neustart).</p>
+      <label>LUKS-Passphrase
+        <input type="password" name="passphrase" autocomplete="off" required>
+      </label>
+      <p class="dlg-error" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn" data-close>Später</button>
+        <button type="submit" class="btn primary">Entsperren</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Klonen -->
+  <dialog id="dlg-clone">
+    <form method="dialog" class="dlg">
+      <h2>Neue VM klonen</h2>
+      <label>Quell-VM (muss ausgeschaltet sein)
+        <select name="source" required></select>
+      </label>
+      <label>Kundenkürzel
+        <span class="prefixed"><span class="prefix" data-bind="prefix"></span><input type="text" name="suffix" pattern="[a-z0-9-]+" autocomplete="off" spellcheck="false" required></span>
+      </label>
+      <p class="hint">Neuer Name: <strong data-bind="newname">–</strong> · erlaubt: a–z, 0–9, -</p>
+      <label>Aktuelle LUKS-Passphrase der Quell-VM
+        <input type="password" name="old" autocomplete="off" required>
+      </label>
+      <label>Neue LUKS-Passphrase für den Klon
+        <input type="password" name="new1" autocomplete="new-password" required>
+      </label>
+      <label>Neue Passphrase wiederholen
+        <input type="password" name="new2" autocomplete="new-password" required>
+      </label>
+      <p class="hint">Der Klon bekommt zuerst einen zusätzlichen Keyslot mit der neuen Passphrase. Erst nachdem er sich damit entsperren ließ, wird der alte Keyslot entfernt.</p>
+      <p class="dlg-error" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn" data-close>Abbrechen</button>
+        <button type="submit" class="btn primary">Klonen</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Bestätigung -->
+  <dialog id="dlg-confirm">
+    <form method="dialog" class="dlg">
+      <h2 data-bind="title"></h2>
+      <p data-bind="text"></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn" data-close>Abbrechen</button>
+        <button type="submit" class="btn danger" data-bind="ok"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,22 @@
+services:
+  vmdash:
+    build: .
+    # Alternativ das fertige Image aus GHCR (dann "build: ." auskommentieren):
+    # image: ghcr.io/maxkhl/vmdash:latest
+    container_name: vmdash
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VMDASH_PORT: "8000"
+      # Pfad im Container, wenn unten die VM-Konfiguration eingebunden ist:
+      # VMDASH_VM_CONFIG: /config/vm-config.json
+    ports:
+      # Standard nur lokal: Nginx Proxy Manager auf demselben Host.
+      # Ohne eigene Anmeldung darf der Port NICHT ungeschützt im LAN hängen.
+      - "${VMDASH_PUBLISH:-127.0.0.1:8000}:8000"
+    volumes:
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
+      # - ./vm-config.json:/config/vm-config.json:ro
+    group_add:
+      # GID der Socket-Gruppe: stat -c %g /var/run/libvirt/libvirt-sock
+      - "${LIBVIRT_SOCK_GID:?LIBVIRT_SOCK_GID in .env eintragen}"

@@ -1,0 +1,5 @@
+# Nur für Entwicklung und CI. Im Container kommen Flask, waitress und
+# libvirt-python per apt aus Debian trixie.
+flask>=3.1
+waitress>=3.0
+pytest>=8
