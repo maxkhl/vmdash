@@ -84,12 +84,23 @@ gw="$(grep -i '^gatewayhostname:s:' "$tmp" | head -n 1 | cut -d: -f3- | tr -d '\
 [[ -n "$gw" ]] || fail "Keine Gateway-Angabe in $src"
 
 echo "$(date '+%F %T') Starte Verbindung über Gateway $gw" >> "$log"
+# FreeRDP endet auch beim normalen Schließen des Fensters mit Rückgabewert != 0
+# (ERRCONNECT_CONNECT_CANCELLED). Als Fehler gilt nur ein frühes Ende.
+SECONDS=0
+rc=0
 flatpak run --filesystem=xdg-run/vmdash-rdp:ro com.freerdp.FreeRDP \
     "$tmp" \
     "/gateway:g:${gw},usage-method:direct,type:http" \
     /dynamic-resolution \
     /cert:tofu \
-    >> "$log" 2>&1 || fail "FreeRDP beendet mit Fehler, Details in $log"
+    >> "$log" 2>&1 || rc=$?
+runtime=$SECONDS
+echo "$(date '+%F %T') FreeRDP beendet: Rückgabewert $rc nach ${runtime} s" >> "$log"
+
+if (( rc != 0 && runtime <= 30 )); then
+    fail "Verbindung fehlgeschlagen (Rückgabewert $rc), Details in $log"
+fi
+exit 0
 EOF
 chmod 755 "$LAUNCHER"
 
