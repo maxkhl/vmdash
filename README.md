@@ -381,14 +381,12 @@ funktionieren damit sofort, vmdash muss rdpgw nicht anfassen. Abgesichert wird
 über zwei Wege:
 
 - In Authentik ist nur der eigene Benutzer an die Application gebunden.
-- Die Firewall auf maxwork (siehe unten) lässt rdpgw nur das VM-Netz erreichen.
+- Die Firewall auf maxwork (siehe unten) lässt Port 3389 nur im VM-Netz zu.
 
-**Firewall auf maxwork:** Port 8443 soll nur von maxmedia erreichbar sein, für IPv4
-und IPv6. rdpgw (UID 1001, Host-Netz) darf ausgehend nur:
+**Firewall auf maxwork:**
 
-- ins VM-Netz auf Port 3389,
-- zu Authentik auf maxmedia (443),
-- DNS.
+- Port 8443 ist nur von maxmedia erreichbar, für IPv4 und IPv6.
+- rdpgw (UID 1001, Host-Netz) darf Port 3389 nur im VM-Netz ansprechen.
 
 Die Regeln sind nicht persistent (siehe [Offen](#12-offen)):
 
@@ -399,21 +397,11 @@ sudo iptables  -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv4> -j ACCEPT
 sudo ip6tables -I INPUT -p tcp --dport 8443 -j DROP
 sudo ip6tables -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv6> -j ACCEPT
 
-# [Host maxwork] ausgehend für rdpgw (UID 1001)
-sudo iptables -N RDPGW_OUT
-sudo iptables -A RDPGW_OUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -A RDPGW_OUT -o lo -j ACCEPT
-sudo iptables -A RDPGW_OUT -p tcp -d 192.168.122.0/24 --dport 3389 -j ACCEPT
-sudo iptables -A RDPGW_OUT -p tcp -d <maxmedia-ipv4> --dport 443 -j ACCEPT
-sudo iptables -A RDPGW_OUT -p udp --dport 53 -j ACCEPT
-sudo iptables -A RDPGW_OUT -p tcp --dport 53 -j ACCEPT
-sudo iptables -A RDPGW_OUT -j REJECT
-sudo iptables -I OUTPUT -m owner --uid-owner 1001 -j RDPGW_OUT
-sudo ip6tables -I OUTPUT -m owner --uid-owner 1001 -m conntrack ! --ctstate ESTABLISHED,RELATED -p tcp ! --dport 53 -j REJECT
+# [Host maxwork] ausgehend: rdpgw darf 3389 nur im VM-Netz ansprechen
+sudo iptables -I OUTPUT -m owner --uid-owner 1001 -p tcp --dport 3389 ! -d 192.168.122.0/24 -j REJECT
 ```
 
-Die Zeile `ESTABLISHED,RELATED` ist nötig, weil auch die Antworten an den NPM als
-UID 1001 durch `OUTPUT` laufen.
+Weitere Ports blockiert rdpgw selbst über `AllowedDestinationPorts: [3389]`.
 
 **DNS:** maxwork muss `*.maxkhl.com` über AdGuard auflösen, also auf die interne
 Adresse von maxmedia. Sonst erreicht rdpgw Authentik nicht (OIDC-Discovery und

@@ -90,8 +90,10 @@ Weitere Punkte beim Klonen:
 
   Vorlage: `docs/rdpgw/npm-advanced.conf`.
 - rdpgw erlaubt jedes private Ziel auf Port 3389 (Entscheidung A); vmdash fasst
-  rdpgw nie an. Eingeschränkt wird per Firewall auf maxwork und
-  Authentik-Binding.
+  rdpgw nie an. Eingeschränkt wird per Firewall auf maxwork (3389 nur ins
+  VM-Netz) und Authentik-Binding.
+- `Hosts` in `rdpgw.yaml` braucht auch bei `HostSelection: any` mindestens einen
+  Eintrag, sonst startet rdpgw nicht („Not enough hosts to connect to specified“).
 - `client/vmdash-rdp-setup.sh` nicht inhaltlich umbauen; Änderungen nur mit
   Begründung im Commit. Vor jedem Commit `shellcheck` über das Skript und den
   eingebetteten Starter laufen lassen (die CI tut das auch).

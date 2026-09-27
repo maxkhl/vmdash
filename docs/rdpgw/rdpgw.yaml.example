@@ -14,8 +14,13 @@ Server:
   GatewayAddress: rdpgw.maxkhl.com
   # Entscheidung A: jedes Ziel aus der Anfrage (?host=<ip>:3389) erlauben,
   # eingeschränkt auf private Ziele und Port 3389. Zusätzlich Firewall auf
-  # maxwork (nur 192.168.122.0/24:3389) und in Authentik nur der eigene Benutzer.
+  # maxwork (3389 nur ins VM-Netz 192.168.122.0/24) und in Authentik nur der
+  # eigene Benutzer.
   HostSelection: any
+  # Muss auch bei "any" mindestens einen Eintrag haben, sonst startet rdpgw
+  # nicht ("Not enough hosts to connect to specified").
+  Hosts:
+    - <vm-ip>:3389
   AllowPrivateDestinations: true
   AllowedDestinationPorts:
     - 3389
