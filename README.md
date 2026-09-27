@@ -16,9 +16,10 @@ Bei jedem Befehl steht, wo er auszuführen ist:
 - **Klonen:** Legt aus einer ausgeschalteten VM (Standard: `sap-template`) eine neue
   Kunden-VM an. Dazu gehören ein eigener LUKS-Keyslot, Hostname, machine-id und
   SSH-Host-Keys (siehe [Klonen](#8-klonen)). Das Dashboard ersetzt das Skript `vm-klon`.
-- **RDP-Link:** Ist für eine VM eine RDP-Adresse eingetragen, zeigt die VM-Karte einen
-  `rdp://`-Link und einen Download einer `.rdp`-Datei. Ob RDP erreichbar ist, prüft
-  vmdash nicht.
+- **RDP über rdpgw:** Bei einer laufenden VM mit bekannter IP führt „Verbinden“
+  zum RD Gateway (rdpgw), das eine `.rdp`-Datei liefert. Ein einmal eingerichteter
+  Starter öffnet sie mit FreeRDP, ohne VPN (siehe [Abschnitt 9](#9-rdp-über-rdpgw)).
+  Ob RDP im Gast erreichbar ist, prüft vmdash nicht.
 
 > **Keine eigene Anmeldung.** vmdash hat kein Login. Es muss hinter Authentik
 > Forward Auth im Nginx Proxy Manager laufen (siehe [Abschnitt 5](#5-hinter-nginx-proxy-manager-mit-authentik)),
@@ -141,7 +142,6 @@ docker compose pull && docker compose up -d
 - Sie veröffentlicht den Port standardmäßig nur auf `127.0.0.1:8000`
   (`VMDASH_PUBLISH`).
 - Ein `HEALTHCHECK` ruft `/healthz` auf.
-- Optional wird die RDP-Konfiguration eingebunden (siehe [Abschnitt 6](#6-konfiguration)).
 
 Hinweis: Legt libvirtd den Socket bei einem Neustart neu an (ohne
 systemd-Socket-Aktivierung), zeigt der Bind-Mount ins Leere. Dann
@@ -191,7 +191,9 @@ Alle Einstellungen kommen aus Env-Variablen (in `.env`).
 | `VMDASH_VNC_PORT_MAX`   | `5919`                                      | VNC-Portbereich für Klone                   |
 | `VMDASH_LUKS_DEVICE`    | `/dev/vda3`                                 | LUKS-Gerät im Gast                          |
 | `VMDASH_AGENT_TIMEOUT`  | `180`                                       | Sekunden, bis der Guest-Agent antworten muss |
-| `VMDASH_VM_CONFIG`      | leer                                        | optionale JSON-Datei mit RDP-Adressen       |
+| `VMDASH_LIBVIRT_NETWORK`| `default`                                   | libvirt-Netz der VMs (IPs, DHCP-Reservierungen) |
+| `VMDASH_RDPGW_URL`      | leer                                        | RD Gateway für „Verbinden“, leer = aus      |
+| `VMDASH_RDP_PORT`       | `3389`                                      | RDP-Port in den VMs                         |
 | `VMDASH_LOG_LEVEL`      | `INFO`                                      | Log-Level                                   |
 | `VMDASH_MOCK_DELAY`     | `1.0`                                       | nur Mock: Grundverzögerung in Sekunden      |
 | `VMDASH_MOCK_FAIL_STEP` | leer                                        | nur Mock: Klon-Schritt, der fehlschlägt     |
@@ -204,24 +206,6 @@ Im Betrieb `VMDASH_BACKEND=libvirt` setzen (so steht es in `.env.example`). Mit
 `auto` fällt vmdash bei einem Verbindungsproblem in den Mock-Modus zurück. Die
 Oberfläche zeigt das zwar mit einem roten Banner „MOCK-MODUS“, aber nur der
 Wert `libvirt` macht das Problem sofort als Fehler sichtbar.
-
-### RDP-Adressen (`VMDASH_VM_CONFIG`)
-
-```json
-{
-  "kunde-beispiel": {"rdp_host": "192.168.0.50", "rdp_port": 3389}
-}
-```
-
-`rdp_port` ist optional (Standard 3389). Die Datei wird bei Änderungen ohne
-Neustart neu gelesen. Einbinden:
-
-```sh
-# [Host], im vmdash-Ordner
-cp vm-config.example.json vm-config.json
-# in docker-compose.yml die Zeilen für ./vm-config.json und VMDASH_VM_CONFIG einkommentieren
-docker compose up -d
-```
 
 ## 7. Sicherheitshinweise
 
@@ -258,7 +242,10 @@ vmdash prüft vor jeder Aktion:
 - Im Pool ist mindestens das 1,2-fache der belegten Größe der Quell-Disk frei
   (maxwork hat nur eine 256-GB-NVMe).
 - Im Bereich 5910–5919 ist ein VNC-Port frei.
-- Die Quelle hat einen Guest-Agent-Kanal.
+- Die Quelle hat einen Guest-Agent-Kanal und eine Netzwerkkarte im libvirt-Netz
+  (`VMDASH_LIBVIRT_NETWORK`).
+- Im Netz gibt es noch keine DHCP-Reservierung mit dem neuen Namen, und im
+  DHCP-Bereich ist eine IP frei.
 
 ### Ablauf
 
@@ -274,19 +261,29 @@ Jeder Schritt erscheint mit Status in der VM-Karte.
    - der VNC-Port (fest, `autoport='no'`).
    - NVRAM: Die VARS-Datei der Quelle wird zum `template`, der Klon bekommt
      `<name>_VARS.fd`. So bleiben die UEFI-Boot-Einträge erhalten.
-3. **Klon starten** und mit der **alten** Passphrase entsperren.
-4. **Auf den Guest-Agent warten.**
-5. **Neue Passphrase als zusätzlichen Keyslot** hinzufügen
+3. **Feste IP reservieren:** Vor dem ersten Start wählt vmdash die niedrigste
+   freie IP im DHCP-Bereich (nicht reserviert, nicht verliehen) und trägt sie mit
+   der neuen MAC und dem VM-Namen als `<host>` ins Netz ein (live und dauerhaft,
+   entspricht `virsh net-update … add-last ip-dhcp-host`).
+4. **Klon starten** und mit der **alten** Passphrase entsperren.
+5. **Auf den Guest-Agent warten.**
+6. **Neue Passphrase als zusätzlichen Keyslot** hinzufügen
    (`cryptsetup luksAddKey`, Schlüssel als Dateien in `/run`).
-6. **Hostname** setzen (auch in `/etc/hosts`), **machine-id** und
-   **SSH-Host-Keys** neu erzeugen.
-7. **Neustart** und Entsperren mit der **neuen** Passphrase. Klappt das nicht,
-   bricht der Ablauf ab. Der alte Keyslot ist dann noch aktiv, und der Klon lässt
-   sich weiter mit der Passphrase der Quelle öffnen.
-8. Erst jetzt wird der **alte Keyslot entfernt** (`cryptsetup luksRemoveKey`).
+7. **Hostname** setzen (auch in `/etc/hosts`).
+8. **xrdp-Zertifikat neu erzeugen.** Sonst erbt der Klon das Zertifikat des
+   Templates (CN `sap-template`). Das geht nur, wenn `/etc/xrdp/cert.pem` und
+   `key.pem` Symlinks auf das Snakeoil-Zertifikat sind (Debian-Standard). Dann
+   laufen `make-ssl-cert generate-default-snakeoil --force-overwrite` und
+   `systemctl restart xrdp`. Andernfalls bricht der Schritt mit einer Meldung ab.
+   Ohne `/etc/xrdp` wird er übersprungen.
+9. **machine-id** und **SSH-Host-Keys** neu erzeugen.
+10. **Neustart** und Entsperren mit der **neuen** Passphrase. Klappt das nicht,
+    bricht der Ablauf ab. Der alte Keyslot ist dann noch aktiv, und der Klon lässt
+    sich weiter mit der Passphrase der Quelle öffnen.
+11. Erst jetzt wird der **alte Keyslot entfernt** (`cryptsetup luksRemoveKey`).
 
 Bei einem Fehler bleibt der Klon bestehen. „Klon löschen“ entfernt dann nach
-Bestätigung Domain, Volume und NVRAM-Datei.
+Bestätigung Domain, Volume, NVRAM-Datei und die DHCP-Reservierung.
 
 ### Manuelle Checkliste nach dem Klonen
 
@@ -296,9 +293,141 @@ Die Liste erscheint auch in der Oberfläche:
 - [ ] In Authentik einen RAC-Endpunkt für den neuen VNC-Port (`127.0.0.1:<port>`) anlegen.
 - [ ] Kunden-VPN im Gast installieren.
 - [ ] SAP-GUI-Verbindung und ABAP-Projekt in Eclipse einrichten.
-- [ ] Optional die RDP-Adresse in `VMDASH_VM_CONFIG` eintragen.
 
-## 9. Entwicklung
+Für RDP ist nichts zu tun: Der Klon hat eine feste IP, und rdpgw erlaubt jedes
+Ziel im VM-Netz (Entscheidung A, siehe [Abschnitt 9](#9-rdp-über-rdpgw)).
+
+## 9. RDP über rdpgw
+
+Die VMs hängen im libvirt-NAT-Netz und sind aus dem LAN nicht direkt erreichbar.
+RDP läuft deshalb über [rdpgw](https://github.com/bolkedebruin/rdpgw), ein
+RD Gateway mit Anmeldung über Authentik:
+
+1. **[Browser]** „Verbinden“ ist ein normaler Link auf
+   `VMDASH_RDPGW_URL/connect?host=<VM-IP>:3389`. Die `.rdp`-Datei muss direkt im
+   Browser von rdpgw kommen, weil das Token darin an die Browser-Sitzung und die
+   Client-IP gebunden ist.
+2. **[Browser]** rdpgw meldet über Authentik an und liefert die `.rdp`-Datei.
+3. **[Client]** Der eingerichtete Starter öffnet sie mit FreeRDP über das Gateway
+   (Websocket-Transport).
+
+Die IP einer VM kommt aus ihrer DHCP-Reservierung im Netz (über die MAC aus der
+Domain-XML), ersatzweise aus der aktuellen Lease. Ohne IP zeigt die VM-Karte
+einen Hinweis statt des Knopfs.
+
+### Client einrichten
+
+In der Kopfzeile führt „RDP-Client einrichten“ zu einer kurzen Anleitung.
+
+- **Linux:** Das Skript `client/vmdash-rdp-setup.sh` herunterladen und einmal
+  ausführen. Es installiert FreeRDP als Flatpak (`com.freerdp.FreeRDP`) für den
+  aktuellen Benutzer und meldet einen Starter für `.rdp`-Dateien an. Danach im
+  Browser einstellen, dass `.rdp`-Dateien immer geöffnet werden.
+
+  ```sh
+  # [Client]
+  bash vmdash-rdp-setup.sh               # einrichten
+  bash vmdash-rdp-setup.sh --uninstall   # entfernen
+  ```
+
+- **Windows:** Keine Einrichtung nötig, der eingebaute Client öffnet `.rdp`-Dateien
+  direkt. Noch nicht getestet (siehe [Offen](#12-offen)).
+
+Remmina ist nicht geeignet: Es schaltet den Websocket-Transport ab und übernimmt
+die Einstellung nicht aus `.rdp`-Dateien. rdpgw lehnt den klassischen
+HTTP-Transport ab.
+
+### rdpgw aufsetzen
+
+Die Vorlagen liegen in [`docs/rdpgw/`](docs/rdpgw/):
+
+- `compose.yaml.example` für den Dockge-Stack auf maxwork: im Host-Netz, Port 8443,
+  Entrypoint direkt auf `/opt/rdpgw/rdpgw -c …`.
+- `rdpgw.yaml.example` mit Platzhaltern statt Secrets.
+- `npm-advanced.conf` für den Proxy-Host im NPM.
+
+**Authentik (OIDC):**
+
+1. Einen OAuth2/OpenID-Provider anlegen: Typ „Confidential“, Redirect-URI
+   `https://rdpgw.maxkhl.com/callback`.
+2. Eine Application mit Slug `rdpgw` anlegen und mit dem Provider verbinden.
+3. Unter „Policy / Group / User Bindings“ nur den eigenen Benutzer binden.
+4. Client-ID und Client-Secret in `rdpgw.yaml` eintragen; `ProviderUrl` ist
+   `https://<authentik-host>/application/o/rdpgw/`.
+
+**Nginx Proxy Manager (auf maxmedia):**
+
+- Proxy-Host `rdpgw.maxkhl.com` auf `http://<maxwork-ip>:8443` anlegen.
+- „Websockets Support“ einschalten.
+- Im SSL-Tab **HTTP/2 ausschalten**.
+- Unter *Advanced* den Inhalt von `npm-advanced.conf` eintragen: `proxy_buffering off`,
+  `proxy_request_buffering off`, `chunked_transfer_encoding off` und lange Timeouts.
+
+**Stack starten:**
+
+```sh
+# [Host maxwork]
+sudo mkdir -p /opt/stacks/rdpgw
+sudo cp docs/rdpgw/compose.yaml.example /opt/stacks/rdpgw/compose.yaml
+sudo cp docs/rdpgw/rdpgw.yaml.example /opt/stacks/rdpgw/rdpgw.yaml    # dann ausfüllen
+sudo chown 1001:1001 /opt/stacks/rdpgw/rdpgw.yaml
+sudo chmod 600 /opt/stacks/rdpgw/rdpgw.yaml
+cd /opt/stacks/rdpgw && sudo docker compose up -d
+```
+
+**Welche Ziele rdpgw erlaubt (Entscheidung A):** `HostSelection: any` mit
+`AllowPrivateDestinations: true` und `AllowedDestinationPorts: [3389]`. Neue Klone
+funktionieren damit sofort, vmdash muss rdpgw nicht anfassen. Abgesichert wird
+über zwei Wege:
+
+- In Authentik ist nur der eigene Benutzer an die Application gebunden.
+- Die Firewall auf maxwork (siehe unten) lässt rdpgw nur das VM-Netz erreichen.
+
+**Firewall auf maxwork:** Port 8443 soll nur von maxmedia erreichbar sein, für IPv4
+und IPv6. rdpgw (UID 1001, Host-Netz) darf ausgehend nur:
+
+- ins VM-Netz auf Port 3389,
+- zu Authentik auf maxmedia (443),
+- DNS.
+
+Die Regeln sind nicht persistent (siehe [Offen](#12-offen)):
+
+```sh
+# [Host maxwork] eingehend: 8443 nur von maxmedia
+sudo iptables  -I INPUT -p tcp --dport 8443 -j DROP
+sudo iptables  -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv4> -j ACCEPT
+sudo ip6tables -I INPUT -p tcp --dport 8443 -j DROP
+sudo ip6tables -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv6> -j ACCEPT
+
+# [Host maxwork] ausgehend für rdpgw (UID 1001)
+sudo iptables -N RDPGW_OUT
+sudo iptables -A RDPGW_OUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A RDPGW_OUT -o lo -j ACCEPT
+sudo iptables -A RDPGW_OUT -p tcp -d 192.168.122.0/24 --dport 3389 -j ACCEPT
+sudo iptables -A RDPGW_OUT -p tcp -d <maxmedia-ipv4> --dport 443 -j ACCEPT
+sudo iptables -A RDPGW_OUT -p udp --dport 53 -j ACCEPT
+sudo iptables -A RDPGW_OUT -p tcp --dport 53 -j ACCEPT
+sudo iptables -A RDPGW_OUT -j REJECT
+sudo iptables -I OUTPUT -m owner --uid-owner 1001 -j RDPGW_OUT
+sudo ip6tables -I OUTPUT -m owner --uid-owner 1001 -m conntrack ! --ctstate ESTABLISHED,RELATED -p tcp ! --dport 53 -j REJECT
+```
+
+Die Zeile `ESTABLISHED,RELATED` ist nötig, weil auch die Antworten an den NPM als
+UID 1001 durch `OUTPUT` laufen.
+
+**DNS:** maxwork muss `*.maxkhl.com` über AdGuard auflösen, also auf die interne
+Adresse von maxmedia. Sonst erreicht rdpgw Authentik nicht (OIDC-Discovery und
+Token-Prüfung).
+
+```sh
+# [Host maxwork] Prüfen
+resolvectl query <authentik-host>
+```
+
+**vmdash einschalten:** In `.env` von vmdash `VMDASH_RDPGW_URL=https://rdpgw.maxkhl.com`
+setzen und den Stack neu starten.
+
+## 10. Entwicklung
 
 Entwickelt wird ohne Zugriff auf die VMs. Das Mock-Backend simuliert drei VMs,
 den Boot mit dem echten Konsolenmitschnitt (`testdata/boot-debian13-luks.txt`),
@@ -311,6 +440,10 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 VMDASH_BACKEND=mock .venv/bin/python -m app       # http://localhost:8000
 .venv/bin/python -m pytest -q
+# shellcheck über das Einrichtungsskript und den darin eingebetteten Starter
+.venv/bin/shellcheck client/vmdash-rdp-setup.sh
+awk "/<< 'EOF'/{f=1;next} /^EOF\$/{f=0} f" client/vmdash-rdp-setup.sh > /tmp/vmdash-rdp-open
+.venv/bin/shellcheck /tmp/vmdash-rdp-open
 ```
 
 Nützliche Varianten:
@@ -341,7 +474,10 @@ Aufbau:
 | `app/clone.py`                    | Klon-Ablauf inkl. XML-Anpassung                       |
 | `app/jobs.py`                     | Job-Verwaltung (nur im Speicher)                      |
 | `app/web.py`                      | Routen und API                                        |
+| `app/network.py`                  | IP-Ermittlung und IP-Auswahl im libvirt-Netz          |
 | `app/static/`                     | Frontend (Vanilla-JS, ohne Build-Schritt)             |
+| `client/vmdash-rdp-setup.sh`      | Einrichtung des RDP-Starters (Linux-Client)           |
+| `docs/rdpgw/`                     | Vorlagen für rdpgw, NPM                               |
 | `testdata/`                       | echter Boot-Mitschnitt und echte Template-XML         |
 
 ### API
@@ -350,17 +486,18 @@ Aufbau:
 | ------- | -------------------------- | --------------------------------------------------------- |
 | GET     | `/healthz`                 | –                                                         |
 | GET     | `/api/info`                | Backend-Modus, Version, Template-Name                     |
-| GET     | `/api/vms`                 | VMs mit Zustand, Job und RDP-Eintrag                      |
+| GET     | `/api/vms`                 | VMs mit Zustand, Job, IP und rdpgw-Link                   |
 | POST    | `/api/vms/{name}/start`    | `{passphrase}`                                            |
 | POST    | `/api/vms/{name}/unlock`   | `{passphrase}`, erneute Eingabe nach `wrong_key`          |
 | POST    | `/api/vms/{name}/shutdown` | –                                                         |
 | POST    | `/api/vms/{name}/destroy`  | –                                                         |
 | POST    | `/api/vms/{name}/clone`    | `{suffix, old_passphrase, new_passphrase}`                |
 | POST    | `/api/vms/{name}/delete`   | –, nur für fehlgeschlagene Klone                          |
-| GET     | `/api/vms/{name}/rdp`      | `.rdp`-Datei (404 ohne Eintrag)                           |
+| GET     | `/rdp-client`              | Anleitung zur Client-Einrichtung                          |
+| GET     | `/client/vmdash-rdp-setup.sh` | Einrichtungsskript für Linux                           |
 | GET     | `/api/jobs/{id}`           | Job-Status mit Schritt-Liste                              |
 
-## 10. Manueller Test auf maxwork
+## 11. Manueller Test auf maxwork
 
 Diese Punkte sind nur gegen den echten Host prüfbar, die automatischen Tests
 laufen gegen das Mock-Backend.
@@ -374,8 +511,9 @@ laufen gegen das Mock-Backend.
    erneut, danach „Entsperrt“. **[Host]** `virsh domstate <vm>` zeigt `running`.
 4. **[Browser]** „Herunterfahren“: Die VM geht aus (ACPI).
    „Hart ausschalten“ auf einer laufenden Test-VM: erst Bestätigung, dann sofort aus.
-5. **[Browser]** Nach einem Eintrag in `vm-config.json` erscheinen der RDP-Link und
-   der `.rdp`-Download.
+5. **[Browser]** Mit gesetzter `VMDASH_RDPGW_URL` zeigt eine laufende VM ihre IP
+   und „Verbinden“. **[Client]** Nach `bash vmdash-rdp-setup.sh` öffnet ein Klick
+   FreeRDP und verbindet über rdpgw. Eine laufende VM ohne IP zeigt den Hinweis.
 6. **[Browser]** Klon von `sap-template` mit Kürzel `test` anlegen. Alle Schritte
    müssen grün werden. Dann prüfen:
    - **[Host]** `virsh dumpxml kunde-test | grep -E "nvram|vnc|mac|source file"`:
@@ -392,6 +530,12 @@ laufen gegen das Mock-Backend.
    - **[VM]** `cat /etc/machine-id` unterscheidet sich vom Template.
    - **[VM]** `ls -l /etc/ssh/ssh_host_*` zeigt frische Zeitstempel.
    - **[VM]** `ls /run/vmdash-*` findet nichts.
+   - **[Host]** `virsh net-dumpxml default | grep kunde-test` zeigt die Reservierung
+     mit der MAC aus `virsh domiflist kunde-test`. Dieselbe Zeile steht auch in
+     `virsh net-dumpxml default --inactive`.
+   - **[VM]** `openssl x509 -noout -subject -in /etc/xrdp/cert.pem` zeigt
+     `CN = kunde-test`.
+   - **[Browser]** „Verbinden“ auf `kunde-test` öffnet eine RDP-Sitzung über rdpgw.
    - **[VM]** `sudo cryptsetup luksDump /dev/vda3` zeigt genauso viele Keyslots
      wie das Template.
 7. **[Browser]** `kunde-test` herunterfahren und neu starten: Die neue Passphrase
@@ -401,8 +545,8 @@ laufen gegen das Mock-Backend.
 9. **[Browser]** Fehlerpfad: einen Klon `test2` mit dreimal falscher alter
    Passphrase anlegen. Erwartet: „fehlgeschlagen“ und der Knopf „Klon löschen“.
    Nach dem Löschen zeigen **[Host]** `virsh list --all`,
-   `virsh vol-list default` und `ls /var/lib/libvirt/qemu/nvram/` keine Reste
-   von `kunde-test2`.
+   `virsh vol-list default`, `ls /var/lib/libvirt/qemu/nvram/` und
+   `virsh net-dumpxml default` keine Reste von `kunde-test2`.
 10. **Konsole belegt.** **[Browser]** Eine VM mit falscher Passphrase starten und
     den Wiederholungs-Dialog offen lassen. **[Host]** In dieser Zeit
     `virsh console <vm>` aufrufen. Erwartet: virsh meldet
@@ -410,3 +554,10 @@ laufen gegen das Mock-Backend.
     und übernimmt umgekehrt nie eine fremde Sitzung.
 11. **[Host]** Aufräumen:
     `virsh destroy kunde-test; virsh undefine kunde-test --nvram --remove-all-storage`.
+
+## 12. Offen
+
+- **Windows-Client:** `mstsc` verlangt laut rdpgw-README Hostnamen statt IPs in
+  der Host-Angabe. Das wird erst bei Bedarf angegangen.
+- **Firewall-Regeln** auf maxwork sind nicht persistent.
+- **`PAATokenEncryptionKey`** ist in rdpgw noch nicht gesetzt.

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RDP-Client einrichten – vmdash</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1><a href="/">vmdash</a></h1>
+      <span class="sub">RDP-Client einrichten</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <p class="muted">„Verbinden“ lädt eine .rdp-Datei vom RD Gateway (rdpgw). Damit sie
+      sich per Klick öffnet, braucht der Rechner einmalig einen passenden Starter.</p>
+
+    <section>
+      <h2>Linux</h2>
+      <p>Voraussetzung: Flatpak. Das Skript richtet alles nur für den aktuellen Benutzer ein,
+        ohne sudo. Es installiert FreeRDP (Flatpak <code>com.freerdp.FreeRDP</code>), falls es
+        fehlt, und meldet einen Starter als Standardprogramm für .rdp-Dateien an.</p>
+      <ol>
+        <li><a href="/client/vmdash-rdp-setup.sh" download>Einrichtungsskript herunterladen</a></li>
+        <li>Einmal im Terminal ausführen (im Download-Ordner):
+          <pre><code>bash vmdash-rdp-setup.sh</code></pre></li>
+        <li>Im Browser einstellen, dass .rdp-Dateien immer geöffnet werden. In Firefox:
+          nach dem ersten „Verbinden“ im Download-Menü auf die Datei rechtsklicken und
+          „Dateien dieses Typs immer öffnen“ wählen. In Chrome/Chromium: im Download-Menü
+          „Dateien dieses Typs immer öffnen“.</li>
+      </ol>
+      <p>Bei Problemen steht ein Log in <code>~/.cache/vmdash-rdp.log</code>.</p>
+      <p>Entfernen:</p>
+      <pre><code>bash vmdash-rdp-setup.sh --uninstall</code></pre>
+    </section>
+
+    <section>
+      <h2>Windows</h2>
+      <p>Keine Einrichtung nötig: Der eingebaute Remotedesktop-Client öffnet .rdp-Dateien direkt.
+        Noch nicht getestet; laut rdpgw verlangt der Windows-Client Hostnamen statt IP-Adressen
+        (siehe README, Abschnitt „Offen“).</p>
+    </section>
+  </main>
+</body>
+</html>

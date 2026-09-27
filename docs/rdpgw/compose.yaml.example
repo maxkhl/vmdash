@@ -1,0 +1,17 @@
+# Dockge-Stack /opt/stacks/rdpgw/compose.yaml auf maxwork
+# rdpgw läuft im Host-Netz (erreicht die VMs im libvirt-NAT-Netz 192.168.122.0/24)
+# und lauscht auf Port 8443 ohne TLS; TLS macht der NPM auf maxmedia.
+services:
+  rdpgw:
+    image: bolkedebruin/rdpgw:latest
+    container_name: rdpgw
+    restart: unless-stopped
+    network_mode: host
+    # Direkt die Binary starten, ohne das Start-Skript des Images
+    entrypoint:
+      - /opt/rdpgw/rdpgw
+      - -c
+      - /etc/rdpgw/rdpgw.yaml
+    volumes:
+      # Datei gehört UID 1001 (Nutzer im Image), Rechte 600: enthält Secrets
+      - ./rdpgw.yaml:/etc/rdpgw/rdpgw.yaml:ro

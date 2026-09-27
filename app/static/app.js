@@ -109,6 +109,10 @@ function renderVm(vm, names) {
     btns.push(`<button class="btn primary" data-act="start" ${busy ? "disabled" : ""}>Starten</button>`);
     btns.push(`<button class="btn" data-act="clone" ${busy ? "disabled" : ""}>Klonen</button>`);
   }
+  if (running && vm.rdp_url) {
+    // Normaler Link: rdpgw liefert die .rdp-Datei direkt an den Browser
+    btns.push(`<a class="btn primary" href="${esc(vm.rdp_url)}" target="_blank" rel="noopener noreferrer">Verbinden</a>`);
+  }
   if (running) {
     btns.push(`<button class="btn" data-act="shutdown">Herunterfahren</button>`);
   }
@@ -116,13 +120,11 @@ function renderVm(vm, names) {
     btns.push(`<button class="btn danger" data-act="destroy">Hart ausschalten</button>`);
   }
 
-  let rdp = "";
-  if (vm.rdp) {
-    const hp = `${vm.rdp.host}:${vm.rdp.port}`;
-    rdp = `<div class="rdp"><span class="label">RDP:</span>
-      <a href="${esc(vm.rdp.url)}">${esc(hp)}</a>
-      <span class="muted">·</span>
-      <a href="/api/vms/${encodeURIComponent(vm.name)}/rdp" download>.rdp-Datei</a></div>`;
+  let net = "";
+  if (running && vm.ip) {
+    net = `<div class="net"><span class="label">IP:</span> ${esc(vm.ip)}</div>`;
+  } else if (running && state.info && state.info.rdpgw) {
+    net = '<div class="net muted">Keine IP bekannt (keine DHCP-Reservierung oder Lease) – RDP nicht verfügbar.</div>';
   }
 
   const panels = [];
@@ -138,7 +140,7 @@ function renderVm(vm, names) {
       <span class="badge ${esc(vm.state)}">${esc(VM_STATES[vm.state] || vm.state)}</span>
     </div>
     ${btns.length ? `<div class="actions">${btns.join("")}</div>` : ""}
-    ${rdp}
+    ${net}
     ${panels.join("")}
   </article>`;
 }
@@ -194,12 +196,12 @@ function renderChecklist(job) {
     `RAC-Endpunkt in Authentik für den neuen VNC-Port anlegen: <code>127.0.0.1:${esc(port)}</code>`,
     "Kunden-VPN im Gast installieren.",
     "SAP-GUI-Verbindung und ABAP-Projekt in Eclipse einrichten.",
-    "Optional: RDP-Adresse in VMDASH_VM_CONFIG eintragen.",
   ];
   const done = checked[job.id] || [];
   return `<ul class="checklist">${items.map((t, i) => `
     <li><label><input type="checkbox" data-act="check" data-job="${esc(job.id)}" data-idx="${i}" ${done.includes(i) ? "checked" : ""}>
-    <span>${t}</span></label></li>`).join("")}</ul>`;
+    <span>${t}</span></label></li>`).join("")}</ul>
+    ${job.result.ip ? `<p class="hint">RDP: feste IP ${esc(job.result.ip)}, „Verbinden“ funktioniert ohne weitere Einrichtung.</p>` : ""}`;
 }
 
 // ------------------------------------------------------------------ Laden
@@ -467,6 +469,7 @@ $("#btn-clone").addEventListener("click", () => openClone(null));
   try {
     state.info = await api("GET", "/api/info");
     $("#mock-banner").hidden = state.info.mode !== "mock";
+    $("#rdp-client-link").hidden = !state.info.rdpgw;
     $("#version").textContent = `vmdash ${state.info.version} · Backend: ${state.info.mode}`;
   } catch (e) {
     showError(`Dashboard nicht erreichbar: ${e.message}`);

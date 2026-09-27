@@ -1,11 +1,9 @@
 """Konfiguration aus Env-Variablen und der optionalen VM-Konfigurationsdatei."""
 
-import json
 import logging
 import os
 import re
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -63,16 +61,14 @@ class Config:
     vnc_port_max: int = 5919
     luks_device: str = "/dev/vda3"
     agent_timeout: float = 180
-    vm_config_path: str = ""
+    libvirt_network: str = "default"
+    rdpgw_url: str = ""
+    rdp_port: int = 3389
     # Nur für das Mock-Backend
     mock_delay: float = 1.0
     mock_fail_step: str = ""
     mock_boot_capture: Path = DEFAULT_BOOT_CAPTURE
     mock_template_xml: Path = DEFAULT_TEMPLATE_XML
-
-    _vm_config_cache: dict = field(default_factory=dict, repr=False)
-    _vm_config_mtime: float | None = field(default=None, repr=False)
-    _vm_config_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
     def from_env(cls):
@@ -92,7 +88,9 @@ class Config:
             vnc_port_max=_env_int("VMDASH_VNC_PORT_MAX", 5919),
             luks_device=_env("VMDASH_LUKS_DEVICE", "/dev/vda3"),
             agent_timeout=_env_float("VMDASH_AGENT_TIMEOUT", 180),
-            vm_config_path=_env("VMDASH_VM_CONFIG", ""),
+            libvirt_network=_env("VMDASH_LIBVIRT_NETWORK", "default"),
+            rdpgw_url=_env("VMDASH_RDPGW_URL", "").rstrip("/"),
+            rdp_port=_env_int("VMDASH_RDP_PORT", 3389),
             mock_delay=_env_float("VMDASH_MOCK_DELAY", 1.0),
             mock_fail_step=_env("VMDASH_MOCK_FAIL_STEP", ""),
         )
@@ -109,47 +107,9 @@ class Config:
                 raise ValueError(f"Ungültiger regulärer Ausdruck in {name}: {e}")
         if self.vnc_port_min > self.vnc_port_max:
             raise ValueError("VMDASH_VNC_PORT_MIN ist größer als VMDASH_VNC_PORT_MAX")
+        if self.rdpgw_url and not re.fullmatch(r"https?://[^\s\"'<>]+", self.rdpgw_url):
+            raise ValueError("VMDASH_RDPGW_URL muss mit http:// oder https:// beginnen")
+        if not 1 <= self.rdp_port <= 65535:
+            raise ValueError("VMDASH_RDP_PORT muss zwischen 1 und 65535 liegen")
         if not re.fullmatch(r"[a-z0-9-]*", self.clone_prefix):
             raise ValueError("VMDASH_CLONE_PREFIX darf nur a-z, 0-9 und - enthalten")
-
-    def vm_config(self):
-        """Liest VMDASH_VM_CONFIG; bei Änderung der Datei ohne Neustart neu."""
-        if not self.vm_config_path:
-            return {}
-        with self._vm_config_lock:
-            try:
-                mtime = os.stat(self.vm_config_path).st_mtime
-            except OSError as e:
-                if self._vm_config_mtime is not None or not self._vm_config_cache:
-                    log.warning("VMDASH_VM_CONFIG nicht lesbar: %s", e)
-                self._vm_config_cache, self._vm_config_mtime = {}, None
-                return {}
-            if mtime != self._vm_config_mtime:
-                try:
-                    with open(self.vm_config_path, encoding="utf-8") as f:
-                        data = json.load(f)
-                    if not isinstance(data, dict):
-                        raise ValueError("oberste Ebene muss ein Objekt sein")
-                    self._vm_config_cache = data
-                except (OSError, ValueError) as e:
-                    log.error("VMDASH_VM_CONFIG fehlerhaft: %s", e)
-                    self._vm_config_cache = {}
-                self._vm_config_mtime = mtime
-            return self._vm_config_cache
-
-    def rdp_for(self, name):
-        """RDP-Eintrag einer VM als (host, port) oder None."""
-        entry = self.vm_config().get(name)
-        if not isinstance(entry, dict):
-            return None
-        host = entry.get("rdp_host")
-        port = entry.get("rdp_port", 3389)
-        if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9.\-:\[\]]+", host):
-            return None
-        try:
-            port = int(port)
-        except (TypeError, ValueError):
-            return None
-        if not 1 <= port <= 65535:
-            return None
-        return host, port

@@ -67,6 +67,44 @@ Weitere Punkte beim Klonen:
 - NVRAM der Quelle wird als `template` gesetzt, die neue Datei heißt
   `<name>_VARS.fd`.
 
+## RDP über rdpgw
+
+- „Verbinden“ ist ein normaler Link auf `VMDASH_RDPGW_URL/connect?host=<ip>:<port>`,
+  kein JavaScript-Abruf. Die `.rdp`-Datei muss direkt im Browser von rdpgw kommen,
+  weil das Token an Browser-Sitzung und Client-IP gebunden ist.
+- Die IP kommt aus der DHCP-Reservierung im libvirt-Netz (Zuordnung über die MAC
+  aus der Domain-XML), ersatzweise aus der aktuellen Lease (`app/network.py`).
+  Direkte IPs aus dem NAT-Netz sind von außen nicht erreichbar; deshalb gibt es
+  keinen `rdp://`-Link und kein `VMDASH_VM_CONFIG` mehr.
+- Der Client MUSS den Websocket-Transport nutzen. Den klassischen HTTP-Transport
+  (RDG_OUT_DATA + RDG_IN_DATA) lehnt rdpgw ab („rejecting reuse of
+  Rdg-Connection-Id … from a different identity“).
+- Remmina schaltet Websocket standardmäßig ab und übernimmt die Einstellung nicht
+  aus `.rdp`-Dateien, deshalb wird es nicht verwendet. FreeRDP 3 nutzt mit
+  `/gateway:…,type:http` automatisch Websocket.
+- NPM braucht für rdpgw:
+  - HTTP/2 aus,
+  - `proxy_buffering off`, `proxy_request_buffering off`,
+    `chunked_transfer_encoding off`,
+  - lange Timeouts und Websocket-Header.
+
+  Vorlage: `docs/rdpgw/npm-advanced.conf`.
+- rdpgw erlaubt jedes private Ziel auf Port 3389 (Entscheidung A); vmdash fasst
+  rdpgw nie an. Eingeschränkt wird per Firewall auf maxwork und
+  Authentik-Binding.
+- `client/vmdash-rdp-setup.sh` nicht inhaltlich umbauen; Änderungen nur mit
+  Begründung im Commit. Vor jedem Commit `shellcheck` über das Skript und den
+  eingebetteten Starter laufen lassen (die CI tut das auch).
+
+## Klonen: Netz und xrdp
+
+- Die DHCP-Reservierung (`networkUpdate`, IP_DHCP_HOST, ADD_LAST, live + config)
+  wird nach dem `define` und vor dem ersten Start angelegt. Gewählt wird die
+  niedrigste freie IP im DHCP-Bereich. „Klon löschen“ entfernt sie wieder.
+- Das xrdp-Zertifikat wird nach dem Hostnamen erneuert, sonst erbt der Klon
+  CN `sap-template`. Das passiert nur, wenn `cert.pem` und `key.pem` Symlinks
+  auf Snakeoil sind; sonst Abbruch statt Raten.
+
 ## Arbeiten am Code
 
 - Tests: `.venv/bin/python -m pytest -q` (venv aus `requirements-dev.txt`).

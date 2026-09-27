@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from .backends.base import SHUTOFF, BackendError
+from .network import free_ip, vm_macs
 from .unlock import UnlockFailed, WrongKey, boot_and_unlock, reboot_and_unlock
 
 log = logging.getLogger(__name__)
@@ -23,16 +24,20 @@ SUFFIX_RE = re.compile(r"^[a-z0-9-]+$")
 HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 AGENT_CHANNEL = "org.qemu.guest_agent.0"
 SPACE_FACTOR = 1.2
+SNAKEOIL_CERT = "/etc/ssl/certs/ssl-cert-snakeoil.pem"
+SNAKEOIL_KEY = "/etc/ssl/private/ssl-cert-snakeoil.key"
 MAX_PASSPHRASE = 512
 
 STEPS = [
     ("check", "Vorbedingungen prüfen"),
     ("clone_volume", "Disk klonen (vol-clone)"),
     ("define", "Domain-XML anpassen und definieren"),
+    ("dhcp", "Feste IP reservieren (DHCP)"),
     ("unlock_old", "Klon starten und mit alter Passphrase entsperren"),
     ("agent", "Auf Guest-Agent warten"),
     ("luks_add_key", "Neue Passphrase als Keyslot hinzufügen"),
     ("hostname", "Hostname setzen"),
+    ("xrdp_cert", "xrdp-Zertifikat neu erzeugen"),
     ("machine_id", "machine-id neu erzeugen"),
     ("ssh_keys", "SSH-Host-Keys neu erzeugen"),
     ("unlock_new", "Neustart und Entsperren mit neuer Passphrase"),
@@ -217,6 +222,23 @@ def check_preconditions(backend, cfg, source, suffix, old_passphrase, new_passph
             f"Zu wenig Platz im Pool „{cfg.storage_pool}“: benötigt ca. {_gb(need)} "
             f"(belegte Größe der Quell-Disk + 20 %), frei {_gb(free)}."
         )
+    net = cfg.libvirt_network
+    if not vm_macs(backend.get_inactive_xml(source), net):
+        raise CloneError(f"Die Quell-VM hat keine Netzwerkkarte im libvirt-Netz „{net}“.")
+    try:
+        dhcp = backend.dhcp_state()
+    except BackendError as e:
+        raise CloneError(f"libvirt-Netz „{net}“ nicht lesbar: {e}")
+    stale = next((h for h in dhcp.hosts if h.name == target), None)
+    if stale:
+        raise CloneError(
+            f"Im Netz „{net}“ gibt es schon eine DHCP-Reservierung für „{target}“ "
+            f"({stale.ip}, {stale.mac}). Auf dem Host entfernen: virsh net-update {net} "
+            f"delete ip-dhcp-host \"<host mac='{stale.mac}'/>\" --live --config"
+        )
+    if free_ip(dhcp) is None:
+        raise CloneError(f"Keine freie IP im DHCP-Bereich des Netzes „{net}“.")
+
     port = free_vnc_port(backend.all_domain_xml(), cfg.vnc_port_min, cfg.vnc_port_max)
     if port is None:
         raise CloneError(
@@ -333,6 +355,9 @@ def run_clone(backend, cfg, manager, job, plan, secrets):
         # Ab hier wird die Quelle nicht mehr gebraucht.
         manager.release(job, plan.source)
 
+        # Feste IP für RDP über rdpgw, vor dem ersten Start
+        _reserve_ip(backend, cfg, job, vm)
+
         # 4. Mit alter Passphrase entsperren
         job.begin("unlock_old")
 
@@ -380,6 +405,9 @@ def run_clone(backend, cfg, manager, job, plan, secrets):
             job.complete("hostname", f"{old_host} → {vm} (auch in /etc/hosts)")
         else:
             job.complete("hostname", f"→ {vm}")
+
+        # xrdp-Zertifikat: Klone erben sonst das des Templates (CN sap-template)
+        _renew_xrdp_cert(backend, job, vm)
 
         # 8. machine-id
         job.begin("machine_id")
@@ -443,6 +471,51 @@ def run_clone(backend, cfg, manager, job, plan, secrets):
     finally:
         # 12. Passphrasen verwerfen, auch bei Abbruch
         secrets.clear()
+
+
+def _reserve_ip(backend, cfg, job, vm):
+    job.begin("dhcp")
+    net = cfg.libvirt_network
+    macs = vm_macs(backend.get_inactive_xml(vm), net)
+    if not macs:
+        raise CloneError(f"Der Klon hat keine Netzwerkkarte im libvirt-Netz „{net}“.")
+    ip = free_ip(backend.dhcp_state())
+    if ip is None:
+        raise CloneError(f"Keine freie IP im DHCP-Bereich des Netzes „{net}“.")
+    try:
+        backend.add_dhcp_host(macs[0], vm, ip)
+    except BackendError as e:
+        raise CloneError(f"DHCP-Reservierung fehlgeschlagen: {e}")
+    job.set_result(dhcp={"mac": macs[0], "name": vm, "ip": ip}, ip=ip)
+    job.complete("dhcp", f"{ip} für {macs[0]} im Netz {net}")
+
+
+def _renew_xrdp_cert(backend, job, vm):
+    job.begin("xrdp_cert")
+    rc, _o, _e = backend.agent_exec(vm, ["test", "-d", "/etc/xrdp"], timeout=30)
+    if rc != 0:
+        job.complete("xrdp_cert", "xrdp nicht installiert – übersprungen", status="skipped")
+        return
+    # Nur das Debian-Standardschema (Symlinks auf Snakeoil) wird erneuert; alles
+    # andere wäre Raten. Auch key.pem prüfen: make-ssl-cert erneuert beide.
+    for link, expected in (("/etc/xrdp/cert.pem", SNAKEOIL_CERT), ("/etc/xrdp/key.pem", SNAKEOIL_KEY)):
+        rc, _o, _e = backend.agent_exec(vm, ["test", "-L", link], timeout=30)
+        target = _exec(backend, vm, ["readlink", "-f", link]).strip() if rc == 0 else ""
+        if target != expected:
+            raise CloneError(
+                f"{link} ist kein Symlink auf {expected}"
+                + (f" (zeigt auf {target})" if target else "")
+                + ". vmdash erneuert nur das Snakeoil-Zertifikat; bitte im Gast von Hand erneuern."
+            )
+    _exec(backend, vm, ["make-ssl-cert", "generate-default-snakeoil", "--force-overwrite"])
+    _exec(backend, vm, ["systemctl", "restart", "xrdp"])
+    try:
+        rc, out, _e = backend.agent_exec(
+            vm, ["openssl", "x509", "-noout", "-subject", "-in", "/etc/xrdp/cert.pem"], timeout=30
+        )
+    except BackendError:
+        rc, out = 1, ""
+    job.complete("xrdp_cert", out.strip() if rc == 0 and out.strip() else "neu erzeugt, xrdp neu gestartet")
 
 
 def _wait_agent_step(backend, cfg, job, vm, step="agent"):

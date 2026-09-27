@@ -4,10 +4,12 @@
 - Passphrase "falsch" wird abgelehnt (3 Versuche wie cryptroot), sonst Erfolg;
   nach luksRemoveKey gilt nur noch der per luksAddKey hinzugefügte Schlüssel
 - Guest-Agent mit kleinem Dateisystem pro Volume (der Klon erbt es)
+- libvirt-NAT-Netz mit DHCP-Reservierungen; VMs ohne Reservierung bekommen
+  nach dem Boot eine Lease
 - VMDASH_MOCK_DELAY: Grundverzögerung in Sekunden
 - VMDASH_MOCK_FAIL_STEP: Schritt, der absichtlich fehlschlägt
-  (clone_volume, define, unlock_old, agent, luks_add_key, hostname,
-  machine_id, ssh_keys, unlock_new, luks_remove_key)
+  (clone_volume, define, dhcp, unlock_old, agent, luks_add_key, hostname,
+  xrdp_cert, machine_id, ssh_keys, unlock_new, luks_remove_key)
 """
 
 import copy
@@ -23,6 +25,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
+from ..network import DhcpHost, DhcpState, free_ip, vm_macs
 from .base import (
     PAUSED,
     RUNNING,
@@ -40,6 +43,10 @@ from .base import (
 log = logging.getLogger(__name__)
 
 POOL_DIR = "/var/lib/libvirt/images"
+NET_GATEWAY = "192.168.122.1"
+NET_RANGE = ("192.168.122.2", "192.168.122.254")
+SNAKEOIL_CERT = "/etc/ssl/certs/ssl-cert-snakeoil.pem"
+SNAKEOIL_KEY = "/etc/ssl/private/ssl-cert-snakeoil.key"
 MAX_TRIES = 3
 GiB = 1024**3
 
@@ -122,6 +129,14 @@ class GuestState:
         # Wildcard: jede Passphrase außer "falsch" passt, bis luksRemoveKey lief.
         self.any_key_valid = True
         self.keys = set()
+        # xrdp mit Snakeoil-Zertifikat (wie im Template), CN = Hostname bei Erzeugung
+        self.xrdp_installed = True
+        self.links = {
+            "/etc/xrdp/cert.pem": SNAKEOIL_CERT,
+            "/etc/xrdp/key.pem": SNAKEOIL_KEY,
+        }
+        self.snakeoil_cn = hostname
+        self.xrdp_restarts = 0
 
 
 class Volume:
@@ -218,6 +233,8 @@ class MockBackend(VmBackend):
         self.pool_capacity = 120 * GiB
         self.volumes = {}
         self.vms = {}
+        self.dhcp_hosts = []  # [DhcpHost]
+        self.leases = {}  # mac -> ip
         self._setup(template_xml)
 
     # ------------------------------------------------------------ Aufbau
@@ -229,24 +246,37 @@ class MockBackend(VmBackend):
             parse_xml(template_xml).find("./devices/disk[@device='disk']/source").get("file")
         )
         self.volumes[tpl_vol] = Volume(tpl_vol, 16 * GiB, GuestState(tpl_name))
-        self.vms[tpl_name] = MockVm(template_xml)
+        self.vms[tpl_name] = MockVm(self._complete_xml(template_xml))
 
         for name, port, running in (("kunde-beispiel", 5910, True), ("kunde-demo", 5911, False)):
             vol = Volume(f"{name}.qcow2", 21 * GiB, GuestState(name))
             self.volumes[vol.name] = vol
             xml = build_clone_xml(template_xml, name, vol.path, port)
-            vm = MockVm(self._with_uuid(xml))
+            vm = MockVm(self._complete_xml(xml))
             self.vms[name] = vm
             if running:
                 vm.state, vm.phase, vm.agent_up, vm.boot_count = RUNNING, "up", True, 1
+        # kunde-beispiel mit fester Reservierung, kunde-demo nur mit (alter) Lease
+        self.dhcp_hosts.append(
+            DhcpHost(self._mac("kunde-beispiel"), "kunde-beispiel", "192.168.122.243")
+        )
+        self.leases[self._mac("kunde-demo")] = "192.168.122.77"
+
+    def _mac(self, name):
+        return vm_macs(self.vms[name].xml, self.cfg.libvirt_network)[0]
 
     @staticmethod
-    def _with_uuid(xml):
+    def _complete_xml(xml):
+        """Wie libvirt beim define: fehlende UUID und MAC-Adressen vergeben."""
         root = ET.fromstring(xml)
         if root.find("uuid") is None:
             el = ET.Element("uuid")
             el.text = str(uuid.uuid4())
             root.insert(1, el)
+        for iface in root.findall("./devices/interface"):
+            if iface.find("mac") is None:
+                mac = "52:54:00:" + ":".join(secrets.token_hex(1) for _ in range(3))
+                iface.insert(0, ET.Element("mac", {"address": mac}))
         return ET.tostring(root, encoding="unicode")
 
     # ------------------------------------------------------------ Helfer
@@ -370,6 +400,7 @@ class MockBackend(VmBackend):
             with self._lock:
                 if vm.gen == gen:
                     vm.phase, vm.agent_up = "up", True
+                    self._lease(vm)
 
         threading.Thread(target=after_unlock, daemon=True).start()
 
@@ -471,7 +502,7 @@ class MockBackend(VmBackend):
         self._sleep(0.5)
         if self._fail("define"):
             raise BackendError("Mock: define absichtlich fehlgeschlagen")
-        vm = MockVm(self._with_uuid(xml))
+        vm = MockVm(self._complete_xml(xml))
         with self._lock:
             if vm.name in self.vms:
                 raise BackendError(f"Domain „{vm.name}“ existiert bereits")
@@ -508,6 +539,46 @@ class MockBackend(VmBackend):
             vol = Volume(new_vol, src.allocation, copy.deepcopy(src.guest))
             self.volumes[new_vol] = vol
             return vol.path
+
+    # ------------------------------------------------------------ Netz
+    def _lease(self, vm):
+        """DHCP beim Boot: Reservierung gewinnt, sonst eine freie Adresse leasen."""
+        for mac in vm_macs(vm.xml, self.cfg.libvirt_network):
+            if any(h.mac == mac for h in self.dhcp_hosts) or mac in self.leases:
+                continue
+            ip = free_ip(self._state())
+            if ip:
+                self.leases[mac] = ip
+
+    def _state(self):
+        return DhcpState(
+            self.cfg.libvirt_network,
+            gateway=NET_GATEWAY,
+            ranges=[NET_RANGE],
+            hosts=[copy.copy(h) for h in self.dhcp_hosts],
+            leases=list(self.leases.items()),
+        )
+
+    def dhcp_state(self):
+        with self._lock:
+            return self._state()
+
+    def add_dhcp_host(self, mac, name, ip):
+        self._sleep(0.2)
+        if self._fail("dhcp"):
+            raise BackendError("Mock: DHCP-Reservierung absichtlich fehlgeschlagen")
+        with self._lock:
+            mac = mac.lower()
+            if any(h.mac == mac or h.name == name or h.ip == ip for h in self.dhcp_hosts):
+                raise BackendError("there is an existing dhcp host entry in network that matches")
+            self.dhcp_hosts.append(DhcpHost(mac, name, ip))
+
+    def remove_dhcp_host(self, mac, name, ip):
+        with self._lock:
+            before = len(self.dhcp_hosts)
+            self.dhcp_hosts = [h for h in self.dhcp_hosts if h.mac != mac.lower()]
+            if len(self.dhcp_hosts) == before:
+                raise NotFound(f"Keine DHCP-Reservierung für {mac}")
 
     def delete_volume(self, vol_name):
         with self._lock:
@@ -568,11 +639,30 @@ class MockBackend(VmBackend):
                 return 1, "", "Mock: machine-id absichtlich fehlgeschlagen"
             fs["/etc/machine-id"] = (secrets.token_hex(16).encode() + b"\n", 0o444)
         elif cmd == "test":
-            return (0 if argv[1:] == ["-d", "/etc/ssh"] else 1), "", ""
+            if argv[1:] == ["-d", "/etc/ssh"]:
+                return 0, "", ""
+            if argv[1:] == ["-d", "/etc/xrdp"]:
+                return (0 if g.xrdp_installed else 1), "", ""
+            if argv[1] == "-L":
+                return (0 if g.xrdp_installed and argv[2] in g.links else 1), "", ""
+            return 1, "", ""
+        elif cmd == "readlink":
+            path = argv[-1]
+            if not g.xrdp_installed and path.startswith("/etc/xrdp/"):
+                return 1, "", ""
+            return 0, g.links.get(path, path) + "\n", ""
+        elif cmd == "make-ssl-cert":
+            if self._fail("xrdp_cert"):
+                return 1, "", "Mock: make-ssl-cert absichtlich fehlgeschlagen"
+            g.snakeoil_cn = g.hostname
+        elif cmd == "openssl":
+            return 0, f"subject=CN = {g.snakeoil_cn}\n", ""
         elif cmd == "ssh-keygen":
             if self._fail("ssh_keys"):
                 return 1, "", "Mock: ssh-keygen absichtlich fehlgeschlagen"
             fs["/etc/ssh/ssh_host_ed25519_key"] = (b"new-key-" + secrets.token_hex(4).encode(), 0o600)
+        elif cmd == "systemctl" and argv[1:] == ["restart", "xrdp"]:
+            g.xrdp_restarts += 1
         elif cmd == "systemctl":
             return 0, "running\n", ""
         elif cmd == "cryptsetup":

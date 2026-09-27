@@ -1,16 +1,15 @@
 """Routen und API. Keine eigene Anmeldung (Authentik Forward Auth davor)."""
 
 import logging
-import re
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 from . import __version__
 from .backends import create_backend
 from .backends.base import RUNNING, SHUTOFF, BackendError, NotFound
 from .clone import STEPS as CLONE_STEPS
 from .clone import CloneError, check_preconditions, run_clone, validate_passphrase
-from .config import Config
+from .config import ROOT_DIR, Config
 from .jobs import Busy, Job, JobManager, NotAwaiting
 from .unlock import UnlockFailed, boot_and_unlock
 
@@ -90,6 +89,19 @@ def create_app(cfg=None, backend=None):
         resp.headers["Cache-Control"] = "no-cache"
         return resp
 
+    @app.get("/rdp-client")
+    def rdp_client_page():
+        resp = send_from_directory(app.static_folder, "rdp-client.html")
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+    @app.get("/client/vmdash-rdp-setup.sh")
+    def rdp_setup_script():
+        return send_from_directory(
+            ROOT_DIR / "client", "vmdash-rdp-setup.sh",
+            mimetype="text/x-shellscript", as_attachment=True, max_age=0,
+        )
+
     @app.get("/healthz")
     def healthz():
         return "ok\n", 200, {"Content-Type": "text/plain"}
@@ -104,6 +116,7 @@ def create_app(cfg=None, backend=None):
                 "clone_prefix": cfg.clone_prefix,
                 "vnc_port_min": cfg.vnc_port_min,
                 "vnc_port_max": cfg.vnc_port_max,
+                "rdpgw": bool(cfg.rdpgw_url),
             }
         )
 
@@ -111,8 +124,15 @@ def create_app(cfg=None, backend=None):
     @app.get("/api/vms")
     def list_vms():
         all_jobs = jobs.all()
+        vms = backend.list_vms()
+        dhcp = None
+        if any(v.state == RUNNING for v in vms):
+            try:
+                dhcp = backend.dhcp_state()
+            except BackendError as e:
+                log.warning("DHCP-Zustand nicht lesbar: %s", e)
         out = []
-        for vm in backend.list_vms():
+        for vm in vms:
             job = next((j for j in reversed(all_jobs) if j.vm == vm.name), None)
             # Klon-Job, dessen Ziel noch nicht definiert ist, erscheint bei der Quelle
             clone_job = next(
@@ -123,7 +143,19 @@ def create_app(cfg=None, backend=None):
                 ),
                 None,
             )
-            rdp = cfg.rdp_for(vm.name)
+            ip = None
+            if vm.state == RUNNING and dhcp is not None:
+                try:
+                    ip = backend.get_ip(vm.name, dhcp)
+                except BackendError:
+                    ip = None
+            # Normaler Link: die .rdp-Datei muss direkt im Browser von rdpgw kommen
+            # (Token an Browser-Sitzung und Client-IP gebunden).
+            rdp_url = (
+                f"{cfg.rdpgw_url}/connect?host={ip}:{cfg.rdp_port}"
+                if cfg.rdpgw_url and ip
+                else None
+            )
             out.append(
                 {
                     "name": vm.name,
@@ -132,9 +164,8 @@ def create_app(cfg=None, backend=None):
                     "job": job.to_dict() if job else None,
                     "clone_job": clone_job.to_dict() if clone_job else None,
                     "busy": jobs.active_for(vm.name) is not None,
-                    "rdp": {"host": rdp[0], "port": rdp[1], "url": f"rdp://{rdp[0]}:{rdp[1]}"}
-                    if rdp
-                    else None,
+                    "ip": ip,
+                    "rdp_url": rdp_url,
                 }
             )
         return jsonify(out)
@@ -258,6 +289,12 @@ def create_app(cfg=None, backend=None):
             raise ApiError(409, "Löschen ist nur für fehlgeschlagene Klone möglich.")
         if jobs.active_for(name) is not None:
             raise ApiError(409, f"Für „{name}“ läuft gerade ein Vorgang.")
+        dhcp = job.result.get("dhcp")
+        if dhcp:
+            try:
+                backend.remove_dhcp_host(dhcp["mac"], dhcp["name"], dhcp["ip"])
+            except BackendError as e:
+                log.warning("DHCP-Reservierung für %s nicht entfernt: %s", name, e)
         vm = backend.get_vm(name)
         if vm is not None:
             if vm.state != SHUTOFF:
@@ -270,28 +307,6 @@ def create_app(cfg=None, backend=None):
         job.set_result(deletable=False, deleted=True)
         log.info("Fehlgeschlagener Klon %s gelöscht", name)
         return jsonify({"ok": True})
-
-    # ------------------------------------------------------------ RDP
-    @app.get("/api/vms/<name>/rdp")
-    def rdp(name):
-        entry = cfg.rdp_for(name)
-        if entry is None:
-            raise ApiError(404, f"Kein RDP-Eintrag für „{name}“.")
-        host, port = entry
-        content = "\r\n".join(
-            [
-                f"full address:s:{host}:{port}",
-                "prompt for credentials:i:1",
-                "administrative session:i:0",
-                "screen mode id:i:2",
-                "",
-            ]
-        )
-        return Response(
-            content,
-            mimetype="application/x-rdp",
-            headers={"Content-Disposition": f'attachment; filename="{re.sub(r"[^A-Za-z0-9._-]", "_", name)}.rdp"'},
-        )
 
     # ------------------------------------------------------------ Jobs
     @app.get("/api/jobs/<job_id>")

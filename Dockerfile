@@ -10,6 +10,7 @@ RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin vmda
 
 WORKDIR /app
 COPY app/ /app/app/
+COPY client/ /app/client/
 # Mitschnitt und Template-XML für den Mock-Modus
 COPY testdata/boot-debian13-luks.txt testdata/sap-template.xml /app/testdata/
 

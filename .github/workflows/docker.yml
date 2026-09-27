@@ -19,6 +19,11 @@ jobs:
           python-version: "3.13"  # wie Debian trixie
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
+      - name: shellcheck (Einrichtungsskript und eingebetteter Starter)
+        run: |
+          shellcheck client/vmdash-rdp-setup.sh
+          awk "/<< 'EOF'/{f=1;next} /^EOF\$/{f=0} f" client/vmdash-rdp-setup.sh > "$RUNNER_TEMP/vmdash-rdp-open"
+          shellcheck "$RUNNER_TEMP/vmdash-rdp-open"
 
   image:
     needs: test

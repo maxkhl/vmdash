@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from ..network import ip_for_macs, vm_macs
+
 # Vereinheitlichte VM-Zustände
 RUNNING = "running"
 SHUTOFF = "shutoff"
@@ -125,6 +127,23 @@ class VmBackend(ABC):
 
     @abstractmethod
     def delete_volume(self, vol_name: str) -> None: ...
+
+    # --- Netz (DHCP im libvirt-Netz VMDASH_LIBVIRT_NETWORK) ---------------
+    @abstractmethod
+    def dhcp_state(self):
+        """DhcpState des konfigurierten Netzes (Bereiche, Reservierungen, Leases)."""
+
+    @abstractmethod
+    def add_dhcp_host(self, mac: str, name: str, ip: str) -> None:
+        """Feste DHCP-Reservierung anlegen (live und in der Konfiguration)."""
+
+    @abstractmethod
+    def remove_dhcp_host(self, mac: str, name: str, ip: str) -> None: ...
+
+    def get_ip(self, name: str, state=None) -> str | None:
+        """IP einer VM: DHCP-Reservierung über ihre MAC, sonst aktuelle Lease."""
+        state = state or self.dhcp_state()
+        return ip_for_macs(state, vm_macs(self.get_inactive_xml(name), state.network))
 
     # --- Guest-Agent -----------------------------------------------------
     @abstractmethod

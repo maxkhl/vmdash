@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 
 import pytest
 
@@ -47,7 +48,9 @@ def test_list_vms(client):
     assert vms["sap-template"]["is_template"]
     assert vms["kunde-beispiel"]["state"] == "running"
     assert vms["kunde-demo"]["state"] == "shutoff"
-    assert vms["kunde-demo"]["rdp"] is None
+    assert vms["kunde-demo"]["ip"] is None  # aus: keine IP
+    assert vms["kunde-beispiel"]["ip"] == "192.168.122.243"
+    assert vms["kunde-beispiel"]["rdp_url"] is None  # VMDASH_RDPGW_URL leer
 
 
 def test_post_requires_json(client):
@@ -167,24 +170,64 @@ def test_passphrases_never_leak(client, caplog):
 # ------------------------------------------------------------------ RDP
 
 
-def test_rdp(make_app, tmp_path):
-    cfg_file = tmp_path / "vms.json"
-    cfg_file.write_text(json.dumps({"kunde-beispiel": {"rdp_host": "192.168.0.50", "rdp_port": 3390}}))
-    client = make_app(vm_config_path=str(cfg_file)).test_client()
+RDPGW = "https://rdpgw.example.de"
+
+
+def test_rdp_connect_link(make_app):
+    client = make_app(rdpgw_url=RDPGW).test_client()
+    assert client.get("/api/info").get_json()["rdpgw"] is True
     vm = vm_state(client, "kunde-beispiel")
-    assert vm["rdp"] == {"host": "192.168.0.50", "port": 3390, "url": "rdp://192.168.0.50:3390"}
-    r = client.get("/api/vms/kunde-beispiel/rdp")
+    assert vm["rdp_url"] == f"{RDPGW}/connect?host=192.168.122.243:3389"
+
+
+def test_rdp_port_configurable(make_app):
+    client = make_app(rdpgw_url=RDPGW, rdp_port=3390).test_client()
+    assert vm_state(client, "kunde-beispiel")["rdp_url"].endswith("host=192.168.122.243:3390")
+
+
+def test_rdp_ip_from_lease_fallback(make_app):
+    client = make_app(rdpgw_url=RDPGW).test_client()
+    # kunde-demo hat keine Reservierung, nur eine Lease
+    job = wait_job(client, start(client, "kunde-demo", "richtig"))
+    assert job["state"] == "unlocked"
+    vm = vm_state(client, "kunde-demo")
+    assert vm["ip"] == "192.168.122.77"
+    assert vm["rdp_url"] == f"{RDPGW}/connect?host=192.168.122.77:3389"
+
+
+def test_rdp_no_ip_no_link(make_app):
+    client = make_app(rdpgw_url=RDPGW).test_client()
+    # Template läuft, hat aber noch keine Lease (wartet am LUKS-Prompt)
+    jid = start(client, "sap-template", "falsch")
+    wait_job(client, jid, awaiting=True)
+    vm = vm_state(client, "sap-template")
+    assert vm["state"] == "running" and vm["ip"] is None and vm["rdp_url"] is None
+    # nach dem Entsperren bekommt es eine Lease
+    client.post("/api/vms/sap-template/unlock", json={"passphrase": "richtig"})
+    wait_job(client, jid)
+    for _ in range(100):
+        if vm_state(client, "sap-template")["ip"]:
+            break
+        time.sleep(0.02)
+    assert vm_state(client, "sap-template")["rdp_url"].startswith(RDPGW)
+
+
+def test_rdp_off_without_url(client):
+    assert client.get("/api/info").get_json()["rdpgw"] is False
+    assert all(v["rdp_url"] is None for v in client.get("/api/vms").get_json())
+
+
+def test_old_rdp_route_removed(client):
+    assert client.get("/api/vms/kunde-beispiel/rdp").status_code == 404
+
+
+def test_rdp_client_page_and_script(client):
+    r = client.get("/rdp-client")
+    assert r.status_code == 200 and "vmdash-rdp-setup.sh" in r.get_data(as_text=True)
+    r = client.get("/client/vmdash-rdp-setup.sh")
     assert r.status_code == 200
-    assert "full address:s:192.168.0.50:3390" in r.get_data(as_text=True)
-    assert 'filename="kunde-beispiel.rdp"' in r.headers["Content-Disposition"]
-    assert client.get("/api/vms/kunde-demo/rdp").status_code == 404
-
-
-def test_rdp_rejects_bad_host(make_app, tmp_path):
-    cfg_file = tmp_path / "vms.json"
-    cfg_file.write_text(json.dumps({"kunde-demo": {"rdp_host": "evil\nusername:s:x"}}))
-    client = make_app(vm_config_path=str(cfg_file)).test_client()
-    assert vm_state(client, "kunde-demo")["rdp"] is None
+    assert r.get_data(as_text=True).startswith("#!/usr/bin/env bash")
+    assert "attachment" in r.headers["Content-Disposition"]
 
 
 # ------------------------------------------------------------------ Klonen
@@ -220,6 +263,15 @@ def test_clone_full_flow(client, backend):
     tpl = backend._guest(backend.vms["sap-template"])
     assert tpl.hostname == "sap-template" and tpl.any_key_valid
     assert not vm_state(client, "sap-template")["busy"]
+    # DHCP-Reservierung mit der MAC des Klons
+    mac = backend._mac("kunde-acme")
+    host = next(h for h in backend.dhcp_hosts if h.name == "kunde-acme")
+    assert host.mac == mac and host.ip == job["result"]["ip"] == "192.168.122.2"
+    assert backend.get_ip("kunde-acme") == "192.168.122.2"
+    # xrdp-Zertifikat nach dem Hostnamen neu erzeugt
+    assert guest.snakeoil_cn == "kunde-acme" and guest.xrdp_restarts == 1
+    assert cmds.index(["hostnamectl", "set-hostname"]) < cmds.index(["make-ssl-cert", "generate-default-snakeoil"])
+    assert "CN = kunde-acme" in next(s["detail"] for s in job["steps"] if s["key"] == "xrdp_cert")
     # Neue Domain-XML
     xml = backend.vms["kunde-acme"].xml
     assert "kunde-acme.qcow2" in xml and "port=\"5912\"" in xml.replace("'", '"')
@@ -312,8 +364,8 @@ def test_source_locked_during_host_phase(make_app):
 
 
 FAIL_STEPS = [
-    "clone_volume", "define", "unlock_old", "agent", "luks_add_key", "hostname",
-    "machine_id", "ssh_keys", "unlock_new", "luks_remove_key",
+    "clone_volume", "define", "dhcp", "unlock_old", "agent", "luks_add_key", "hostname",
+    "xrdp_cert", "machine_id", "ssh_keys", "unlock_new", "luks_remove_key",
 ]
 
 
@@ -356,6 +408,8 @@ def test_delete_failed_clone(make_app):
     assert "kunde-acme" not in backend.vms
     assert "kunde-acme.qcow2" not in backend.volumes
     assert "sap-template.qcow2" in backend.volumes
+    assert not [h for h in backend.dhcp_hosts if h.name == "kunde-acme"]
+    assert [h for h in backend.dhcp_hosts if h.name == "kunde-beispiel"]
     # zweites Mal: nichts mehr zu löschen
     assert client.post("/api/vms/kunde-acme/delete", json={}).status_code == 409
 
@@ -390,3 +444,42 @@ def test_secrets_cleared_after_clone():
         run_clone(be, cfg, JobManager(), job, plan, secrets)
         assert secrets == {}
         assert job.state == ("failed" if fail else "done")
+
+
+def test_clone_xrdp_not_snakeoil(client, backend):
+    backend._guest(backend.vms["sap-template"]).links["/etc/xrdp/cert.pem"] = "/etc/xrdp/eigen.pem"
+    job = wait_job(client, clone(client).get_json()["id"], timeout=20)
+    assert job["state"] == "failed"
+    assert "kein Symlink auf /etc/ssl/certs/ssl-cert-snakeoil.pem" in job["error"]
+    assert [s["key"] for s in job["steps"] if s["status"] == "failed"] == ["xrdp_cert"]
+    argv = [a[0] for a in backend.vms["kunde-acme"].exec_log]
+    assert "make-ssl-cert" not in argv
+
+
+def test_clone_xrdp_not_installed_skipped(client, backend):
+    backend._guest(backend.vms["sap-template"]).xrdp_installed = False
+    job = wait_job(client, clone(client).get_json()["id"], timeout=20)
+    assert job["state"] == "done"
+    step = next(s for s in job["steps"] if s["key"] == "xrdp_cert")
+    assert step["status"] == "skipped"
+
+
+def test_clone_stale_reservation(client, backend):
+    from app.network import DhcpHost
+
+    backend.dhcp_hosts.append(DhcpHost("52:54:00:aa:bb:cc", "kunde-acme", "192.168.122.9"))
+    r = clone(client)
+    assert r.status_code == 400
+    assert "DHCP-Reservierung für „kunde-acme“" in r.get_json()["error"]
+
+
+def test_clone_no_free_ip(client, backend):
+    import app.backends.mock_backend as mb
+
+    orig = mb.NET_RANGE
+    mb.NET_RANGE = ("192.168.122.243", "192.168.122.243")  # einzige IP ist reserviert
+    try:
+        r = clone(client)
+    finally:
+        mb.NET_RANGE = orig
+    assert r.status_code == 400 and "Keine freie IP" in r.get_json()["error"]

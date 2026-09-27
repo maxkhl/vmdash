@@ -1,0 +1,54 @@
+# /opt/stacks/rdpgw/rdpgw.yaml auf maxwork (Besitzer 1001, Rechte 600)
+# Platzhalter <…> ersetzen. Secrets: jeweils 32 zufällige Zeichen, z. B.
+#   [Host maxwork]  openssl rand -hex 16
+# Schlüssel und Aufbau nach der README von bolkedebruin/rdpgw; bei Abweichungen
+# gilt die Doku der eingesetzten Version.
+
+Server:
+  Authentication:
+    - openid
+  # rdpgw spricht nur HTTP, TLS terminiert der NPM auf maxmedia
+  Tls: disable
+  Port: 8443
+  # Adresse, die in die .rdp-Dateien geschrieben wird
+  GatewayAddress: rdpgw.maxkhl.com
+  # Entscheidung A: jedes Ziel aus der Anfrage (?host=<ip>:3389) erlauben,
+  # eingeschränkt auf private Ziele und Port 3389. Zusätzlich Firewall auf
+  # maxwork (nur 192.168.122.0/24:3389) und in Authentik nur der eigene Benutzer.
+  HostSelection: any
+  AllowPrivateDestinations: true
+  AllowedDestinationPorts:
+    - 3389
+  SessionKey: <32-zeichen-zufall>
+  SessionEncryptionKey: <32-zeichen-zufall>
+  SessionStore: cookie
+
+OpenId:
+  # Authentik: OAuth2/OpenID-Provider, Application-Slug "rdpgw"
+  ProviderUrl: https://<authentik-host>/application/o/rdpgw/
+  ClientId: <client-id>
+  ClientSecret: <client-secret>
+
+Caps:
+  SmartCardAuth: false
+  # für OpenID nötig
+  TokenAuth: true
+  # Minuten, 0 = unbegrenzt
+  IdleTimeout: 0
+  EnableClipboard: true
+  EnableDrive: false
+  EnablePrinter: false
+  EnablePort: false
+  EnablePnp: false
+
+Client:
+  UsernameTemplate: "{{ username }}"
+  SplitUserDomain: false
+
+Security:
+  PAATokenSigningKey: <32-zeichen-zufall>
+  # Offen: PAATokenEncryptionKey setzen (siehe README, Abschnitt "Offen")
+  # PAATokenEncryptionKey: <32-zeichen-zufall>
+  UserTokenEncryptionKey: <32-zeichen-zufall>
+  # Token ist an die IP gebunden, von der die .rdp-Datei geladen wurde
+  VerifyClientIp: true

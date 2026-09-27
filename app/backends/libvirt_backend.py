@@ -7,6 +7,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 
+from ..network import parse_network_xml
 from .base import (
     CRASHED,
     PAUSED,
@@ -330,6 +331,46 @@ class LibvirtBackend(VmBackend):
         except self.libvirt.libvirtError as e:
             raise NotFound(f"Volume {vol_name}: {e.get_error_message()}")
         self._call(vol.delete, 0)
+
+    # ------------------------------------------------------------ Netz
+    def _network(self):
+        try:
+            return self.conn().networkLookupByName(self.cfg.libvirt_network)
+        except self.libvirt.libvirtError as e:
+            raise BackendError(f"libvirt-Netz „{self.cfg.libvirt_network}“: {e.get_error_message()}")
+
+    def dhcp_state(self):
+        net = self._network()
+        state = parse_network_xml(self.cfg.libvirt_network, self._call(net.XMLDesc, 0))
+        if net.isActive():
+            try:
+                leases = net.DHCPLeases() or []
+            except self.libvirt.libvirtError:
+                leases = []
+            state.leases = [
+                (l["mac"].lower(), l["ipaddr"])
+                for l in leases
+                if l.get("type") == self.libvirt.VIR_IP_ADDR_TYPE_IPV4 and l.get("mac")
+            ]
+        return state
+
+    def _update_dhcp_host(self, command, mac, name, ip):
+        lv = self.libvirt
+        net = self._network()
+        el = ET.Element("host", {"mac": mac, "name": name, "ip": ip})
+        flags = lv.VIR_NETWORK_UPDATE_AFFECT_CONFIG
+        if net.isActive():
+            flags |= lv.VIR_NETWORK_UPDATE_AFFECT_LIVE
+        self._call(
+            net.update, command, lv.VIR_NETWORK_SECTION_IP_DHCP_HOST, -1,
+            ET.tostring(el, encoding="unicode"), flags,
+        )
+
+    def add_dhcp_host(self, mac, name, ip):
+        self._update_dhcp_host(self.libvirt.VIR_NETWORK_UPDATE_COMMAND_ADD_LAST, mac, name, ip)
+
+    def remove_dhcp_host(self, mac, name, ip):
+        self._update_dhcp_host(self.libvirt.VIR_NETWORK_UPDATE_COMMAND_DELETE, mac, name, ip)
 
     # ------------------------------------------------------------ Agent
     def _agent(self, name, command, arguments=None, timeout=10):
