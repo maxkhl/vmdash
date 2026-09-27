@@ -5,6 +5,9 @@ services:
     # image: ghcr.io/maxkhl/vmdash:latest
     container_name: vmdash
     restart: unless-stopped
+    # libvirtd schlägt die UID des Aufrufers in der /etc/passwd des HOSTS nach;
+    # sie muss dort existieren (sonst: "Failed to find user record for uid").
+    user: "${VMDASH_UID:-1000}:${VMDASH_GID:-1000}"
     env_file: .env
     environment:
       VMDASH_PORT: "8000"

@@ -40,6 +40,15 @@ verraten ihre Länge.
   stat -c %g /var/run/libvirt/libvirt-sock
   ```
 
+- Eine UID/GID, die **auf dem Host existiert**, für den Container (Standard 1000).
+  libvirtd schlägt die UID des Aufrufers in der `/etc/passwd` des Hosts nach und
+  verweigert sonst die Verbindung („Failed to find user record for uid …“):
+
+  ```sh
+  # [Host]
+  id -u; id -g
+  ```
+
 ## 3. Voraussetzungen im Gast bzw. im Template
 
 Das Template `sap-template` braucht das einmalig, danach erben es alle Klone.
@@ -99,7 +108,7 @@ git clone https://github.com/maxkhl/vmdash.git
 cd vmdash
 cp .env.example .env
 stat -c %g /var/run/libvirt/libvirt-sock     # GID notieren
-nano .env                                     # LIBVIRT_SOCK_GID=<GID> eintragen
+nano .env                                     # LIBVIRT_SOCK_GID=<GID>, ggf. VMDASH_UID/VMDASH_GID
 docker compose up -d --build
 docker compose logs -f                        # muss "Verbunden mit qemu:///system" zeigen
 ```
@@ -127,8 +136,8 @@ docker compose pull && docker compose up -d
 ### Was die Compose-Datei macht
 
 - Sie bindet den Host-Socket `/var/run/libvirt/libvirt-sock` in den Container ein.
-  Der Container läuft als unprivilegierter Nutzer und bekommt per `group_add` die
-  Gruppe des Sockets.
+  Der Container läuft als unprivilegierter Nutzer (`VMDASH_UID`/`VMDASH_GID`, muss
+  auf dem Host existieren) und bekommt per `group_add` die Gruppe des Sockets.
 - Sie veröffentlicht den Port standardmäßig nur auf `127.0.0.1:8000`
   (`VMDASH_PUBLISH`).
 - Ein `HEALTHCHECK` ruft `/healthz` auf.
@@ -187,7 +196,8 @@ Alle Einstellungen kommen aus Env-Variablen (in `.env`).
 | `VMDASH_MOCK_DELAY`     | `1.0`                                       | nur Mock: Grundverzögerung in Sekunden      |
 | `VMDASH_MOCK_FAIL_STEP` | leer                                        | nur Mock: Klon-Schritt, der fehlschlägt     |
 
-Für die Compose-Datei gibt es außerdem `LIBVIRT_SOCK_GID` (Pflicht) und
+Für die Compose-Datei gibt es außerdem `LIBVIRT_SOCK_GID` (Pflicht),
+`VMDASH_UID`/`VMDASH_GID` (Standard 1000, muss auf dem Host existieren) und
 `VMDASH_PUBLISH` (Standard `127.0.0.1:8000`).
 
 Im Betrieb `VMDASH_BACKEND=libvirt` setzen (so steht es in `.env.example`). Mit

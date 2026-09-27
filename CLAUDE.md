@@ -32,6 +32,12 @@ UI, Doku und Fehlermeldungen sind auf Deutsch.
   falschen Passphrase gilt nur ein neuer Prompt als „wrong_key“; „maximum number
   of tries exceeded“ oder kein Prompt heißt „failed“.
 
+## Container
+
+Der Container muss mit einer UID laufen, die auf dem Host existiert
+(`user:` in der Compose-Datei, `VMDASH_UID`). libvirtd schlägt die UID des
+Aufrufers per SO_PEERCRED in der Host-`/etc/passwd` nach und lehnt unbekannte ab.
+
 ## Passphrasen
 
 - Nur im Request-Body; nie in Logs, Job-Status, API-Antworten oder
