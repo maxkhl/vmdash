@@ -383,25 +383,27 @@ funktionieren damit sofort, vmdash muss rdpgw nicht anfassen. Abgesichert wird
 - In Authentik ist nur der eigene Benutzer an die Application gebunden.
 - Die Firewall auf maxwork (siehe unten) lässt Port 3389 nur im VM-Netz zu.
 
-**Firewall auf maxwork:**
+**Firewall auf maxwork:** Vier Regeln sichern rdpgw ab.
 
-- Port 8443 ist nur von maxmedia erreichbar, für IPv4 und IPv6.
-- rdpgw (UID 1001, Host-Netz) darf Port 3389 nur im VM-Netz ansprechen.
-
-Die Regeln sind nicht persistent (siehe [Offen](#12-offen)):
+- Eingehend ist 8443 nur von maxmedia (`192.168.0.81`) erreichbar. So kommt niemand
+  an NPM und Authentik vorbei direkt aus dem LAN oder per IPv6 an rdpgw.
+- Ausgehend darf rdpgw (UID 1001, Host-Netz) Port 3389 nur im VM-Netz ansprechen.
 
 ```sh
-# [Host maxwork] eingehend: 8443 nur von maxmedia
-sudo iptables  -I INPUT -p tcp --dport 8443 -j DROP
-sudo iptables  -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv4> -j ACCEPT
+# [Host maxwork] eingehend: 8443 nur von maxmedia, per IPv6 gar nicht
+sudo iptables  -I INPUT -p tcp --dport 8443 ! -s 192.168.0.81 -j DROP
 sudo ip6tables -I INPUT -p tcp --dport 8443 -j DROP
-sudo ip6tables -I INPUT -p tcp --dport 8443 -s <maxmedia-ipv6> -j ACCEPT
 
-# [Host maxwork] ausgehend: rdpgw darf 3389 nur im VM-Netz ansprechen
-sudo iptables -I OUTPUT -m owner --uid-owner 1001 -p tcp --dport 3389 ! -d 192.168.122.0/24 -j REJECT
+# [Host maxwork] ausgehend: rdpgw erreicht 3389 nur im VM-Netz
+sudo iptables  -I OUTPUT -m owner --uid-owner 1001 -p tcp --dport 3389 ! -d 192.168.122.0/24 -j REJECT
+# IPv6 komplett sperren: Das libvirt-Netz "default" hat kein IPv6, rdpgw braucht
+# also nie ein IPv6-Ziel auf 3389 (AllowPrivateDestinations würde es sonst zulassen).
+sudo ip6tables -I OUTPUT -m owner --uid-owner 1001 -p tcp --dport 3389 -j REJECT
 ```
 
-Weitere Ports blockiert rdpgw selbst über `AllowedDestinationPorts: [3389]`.
+Die Regeln überleben keinen Neustart. Sie müssen noch dauerhaft eingerichtet werden
+(siehe [Offen](#12-offen), nicht Teil dieser Umsetzung). Weitere Zielports blockiert
+rdpgw selbst über `AllowedDestinationPorts: [3389]`.
 
 **DNS:** maxwork muss `*.maxkhl.com` über AdGuard auflösen, also auf die interne
 Adresse von maxmedia. Sonst erreicht rdpgw Authentik nicht (OIDC-Discovery und
